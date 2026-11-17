@@ -228,6 +228,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t vibration = VIBRATION_OFF;
   enum HAPTIC_INTENSITY { HAPTIC_LOW = 0, HAPTIC_MEDIUM = 1, HAPTIC_HIGH = 2 };
   uint8_t hapticIntensity = HAPTIC_HIGH;
+  // Short beeps; only offered on boards with a buzzer.
+  uint8_t buttonBeep = 0;  // physical button press
+  uint8_t touchBeep = 0;   // accepted touch action
 
   enum TOUCH_READER_CONTROLS { TOUCH_READER_OFF = 0, TOUCH_READER_ON = 1, TOUCH_READER_CONTROLS_COUNT };
 

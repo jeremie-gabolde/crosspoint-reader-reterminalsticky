@@ -1,5 +1,6 @@
 #pragma once
 
+#include <HalBuzzer.h>
 #include <HalHaptics.h>
 
 #include "CrossPointSettings.h"
@@ -8,6 +9,7 @@
 // Sampling a contact or classifying a gesture must remain silent.
 namespace haptic_feedback {
 inline void touchAction(bool longPress = false) {
+  HalBuzzer::beep(SETTINGS.touchBeep != 0);
   const bool enabled = SETTINGS.vibration != CrossPointSettings::VIBRATION_OFF;
   if (longPress) {
     HalHaptics::longPress(enabled, SETTINGS.hapticIntensity);

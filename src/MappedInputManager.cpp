@@ -3,6 +3,7 @@
 #include <BoardConfig.h>
 #include <FreeInkUICore.h>
 #include <GfxRenderer.h>
+#include <HalBuzzer.h>
 #include <HalHaptics.h>
 
 #include <algorithm>
@@ -17,6 +18,7 @@ namespace fui = freeink::ui;
 void MappedInputManager::update(const bool deferHomeButtonAction) const {
   remoteInput.reset();
   gpio.update();
+  if (gpio.wasAnyPressed()) HalBuzzer::beep(SETTINGS.buttonBeep != 0);
   const bool powerHeld = gpio.isPressed(HalGPIO::BTN_POWER);
   const bool powerReleased = gpio.wasReleased(HalGPIO::BTN_POWER);
   const bool sharedConfirmRelease =
