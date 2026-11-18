@@ -10,6 +10,7 @@
 #include <cstdlib>
 
 #include "CrossPointSettings.h"
+#include "HapticFeedback.h"
 #include "components/HeaderBackTapTarget.h"
 #include "components/UITheme.h"
 
@@ -19,6 +20,19 @@ void MappedInputManager::update(const bool deferHomeButtonAction) const {
   remoteInput.reset();
   gpio.update();
   if (gpio.wasAnyPressed()) HalBuzzer::beep(SETTINGS.buttonBeep != 0);
+  haptic_feedback::beginFrame();
+  haptic_feedback::swipeGesture(gpio);
+  if (gpio.hasTouch()) {
+    // Header back arrow: a tap on it is Button::Back (see wasBackGesture).
+    float nx = 0.0f;
+    float ny = 0.0f;
+    int tapX = 0;
+    int tapY = 0;
+    if (gpio.wasTouchTap(nx, ny)) {
+      renderer.tapToLogical(nx, ny, tapX, tapY);
+      if (HeaderBackTapTarget::contains(tapX, tapY)) haptic_feedback::touchAction();
+    }
+  }
   const bool powerHeld = gpio.isPressed(HalGPIO::BTN_POWER);
   const bool powerReleased = gpio.wasReleased(HalGPIO::BTN_POWER);
   const bool sharedConfirmRelease =
