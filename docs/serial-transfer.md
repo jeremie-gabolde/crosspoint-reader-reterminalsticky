@@ -15,8 +15,6 @@ computer manage the SD card over the USB cable.
 4. Press Back on the reader to leave the mode (logging resumes).
 
 Regenerate the page after changing the web UI: `python tools/serial_bridge/build_page.py`.
-`tools/serial_bridge/serial_bridge.py` is an alternative local HTTP bridge (needs no Web Serial,
-Windows only).
 
 The Home, Files, Settings and Fonts pages work; Plugins, WiFi and OPDS pages need WiFi.
 Limits: folders cannot be moved/renamed (as in the web UI).

@@ -661,9 +661,9 @@ void SerialTransferActivity::render(RenderLock&&) {
   y += lineH * 2;
   if (!hostSeen) {
     renderer.drawCenteredText(UI_10_FONT_ID, y, "Keep the USB-C cable plugged in and");
-    renderer.drawCenteredText(UI_10_FONT_ID, y + lineH, "run tools/serial_bridge on the computer.");
+    renderer.drawCenteredText(UI_10_FONT_ID, y + lineH, "open crosspoint-serial.html on the computer.");
   } else {
-    renderer.drawCenteredText(UI_10_FONT_ID, y, "Use the web page opened on the computer.");
+    renderer.drawCenteredText(UI_10_FONT_ID, y, "Use crosspoint-serial.html on the computer.");
   }
   renderer.drawCenteredText(SMALL_FONT_ID, y + lineH * 3, "Press Back to leave this mode.");
   const auto labels = mappedInput.mapLabels("Back", "", "", "");

@@ -9,8 +9,8 @@
 
 // File transfer over the USB-C serial link (for boards whose USB port is a
 // USB-to-serial bridge and cannot export the SD card as a drive). The reader
-// answers a small framed binary protocol; tools/serial_bridge/ on the computer
-// turns it into the regular CrossPoint web file manager. See docs/serial-transfer.md.
+// answers a small framed binary protocol; tools/serial_bridge/crosspoint-serial.html
+// (Web Serial, Chrome/Edge) turns it into the regular CrossPoint web file manager. See docs/serial-transfer.md.
 class SerialTransferActivity final : public Activity {
  public:
   SerialTransferActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
