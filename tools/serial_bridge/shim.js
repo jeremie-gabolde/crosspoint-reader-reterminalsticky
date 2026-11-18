@@ -1,0 +1,379 @@
+/* CrossPoint serial file manager shim.
+ *
+ * Runs before the stock CrossPoint web UI scripts and replaces the network
+ * layer (fetch, XMLHttpRequest, WebSocket, download links) with the framed
+ * serial protocol of the reader's "Serial Transfer" mode (docs/serial-transfer.md),
+ * using the browser's Web Serial API (Chrome / Edge). The page asks the user to
+ * pick the serial port; nothing is installed on the computer.
+ */
+(() => {
+  'use strict';
+  const BAUD_FAST = 921600;
+  const BAUD_SLOW = 115200;
+  const CHUNK = 4000;
+  const CMD = { HELLO: 1, LIST: 2, READ_OPEN: 3, READ: 4, CLOSE: 5, WRITE_OPEN: 6, WRITE: 7, WRITE_END: 8,
+                MKDIR: 9, RENAME: 10, DELETE: 11, BAUD: 12, STATUS: 13 };
+  const STATUS_TEXT = { 1: 'unknown command', 2: 'bad argument', 3: 'not found',
+                        4: 'already exists (or folder not empty)', 5: 'protected path', 6: 'I/O error', 7: 'bad state' };
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+
+  class DeviceError extends Error {
+    constructor(status, what) {
+      super((what ? what + ': ' : '') + (STATUS_TEXT[status] || 'error ' + status));
+      this.status = status;
+    }
+  }
+
+  // ---- CRC32 (zlib) ----
+  const crcTable = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+    crcTable[i] = c >>> 0;
+  }
+  function crc32(...parts) {
+    let c = 0xFFFFFFFF;
+    for (const p of parts) for (let i = 0; i < p.length; i++) c = crcTable[(c ^ p[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+  const u32 = (v) => new Uint8Array([v & 255, (v >>> 8) & 255, (v >>> 16) & 255, (v >>> 24) & 255]);
+  const cat = (...a) => { const n = a.reduce((s, x) => s + x.length, 0); const o = new Uint8Array(n); let p = 0;
+                          for (const x of a) { o.set(x, p); p += x.length; } return o; };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // ---- serial link ----
+  const link = {
+    port: null, reader: null, writer: null, rx: new Uint8Array(0), waiter: null, reading: false, baud: 0,
+    chain: Promise.resolve(),
+
+    async open(port, baud) {
+      await port.open({ baudRate: baud, bufferSize: 1 << 16 });
+      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) { /* optional */ }
+      this.port = port; this.baud = baud; this.rx = new Uint8Array(0);
+      this.reader = port.readable.getReader(); this.writer = port.writable.getWriter();
+      this.reading = true;
+      (async () => {
+        try {
+          while (this.reading) {
+            const { value, done } = await this.reader.read();
+            if (done) break;
+            if (value && value.length) { this.rx = cat(this.rx, value); if (this.waiter) this.waiter(); }
+          }
+        } catch (e) { /* closed */ }
+      })();
+    },
+    async close() {
+      this.reading = false;
+      try { await this.reader.cancel(); } catch (e) { /* */ }
+      try { this.reader.releaseLock(); } catch (e) { /* */ }
+      try { this.writer.releaseLock(); } catch (e) { /* */ }
+      try { await this.port.close(); } catch (e) { /* */ }
+    },
+    // Waits until a full response frame is buffered, scanning for the sync bytes.
+    async recv(timeout) {
+      const deadline = Date.now() + timeout;
+      for (;;) {
+        const b = this.rx;
+        let i = 0;
+        while (i + 1 < b.length && !(b[i] === 0xA5 && b[i + 1] === 0x5A)) i++;
+        if (i + 1 >= b.length) { this.rx = b.slice(Math.max(0, b.length - 1)); }
+        else if (i + 5 <= b.length) {
+          const len = b[i + 3] | (b[i + 4] << 8);
+          if (len > 4096) { this.rx = b.slice(i + 2); continue; }
+          if (i + 5 + len + 4 <= b.length) {
+            const head = b.slice(i + 2, i + 5), payload = b.slice(i + 5, i + 5 + len);
+            const crc = (b[i + 5 + len] | (b[i + 6 + len] << 8) | (b[i + 7 + len] << 16) | (b[i + 8 + len] << 24)) >>> 0;
+            this.rx = b.slice(i + 9 + len);
+            if (crc === crc32(head, payload)) return { status: head[0], payload };
+            continue;  // corrupt: keep scanning
+          }
+        }
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error('timeout');
+        await new Promise((res) => { const t = setTimeout(res, left); this.waiter = () => { clearTimeout(t); res(); }; });
+        this.waiter = null;
+      }
+    },
+    call(cmd, payload = new Uint8Array(0), opt = {}) {
+      const run = async () => {
+        const timeout = opt.timeout || 3000, retries = opt.retries || 3;
+        const head = new Uint8Array([cmd, payload.length & 255, payload.length >> 8]);
+        const frame = cat(new Uint8Array([0xA5, 0x5A]), head, payload, u32(crc32(head, payload)));
+        let last;
+        for (let a = 0; a < retries; a++) {
+          try {
+            this.rx = new Uint8Array(0);
+            await this.writer.write(frame);
+            const r = await this.recv(timeout);
+            if (r.status !== 0) throw new DeviceError(r.status, opt.what);
+            return r.payload;
+          } catch (e) {
+            if (e instanceof DeviceError) throw e;
+            last = e;
+          }
+        }
+        throw new Error('The reader did not answer (' + (last && last.message) + '). Is Serial Transfer open on it?');
+      };
+      const p = this.chain.then(run, run);
+      this.chain = p.catch(() => {});
+      return p;
+    },
+  };
+
+  // ---- connection / overlay ----
+  let connected = false;
+  let resolveConnected;
+  const connectedPromise = new Promise((r) => { resolveConnected = r; });
+
+  const style = document.createElement('style');
+  style.textContent = `#cpx{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;
+    align-items:center;justify-content:center;font-family:system-ui,sans-serif}
+    #cpx .box{background:#fff;color:#111;max-width:30em;margin:1em;padding:1.5em;border-radius:12px;box-shadow:0 8px 40px #0006}
+    #cpx button{font-size:1em;padding:.6em 1.2em;border-radius:8px;border:0;background:#2563eb;color:#fff;cursor:pointer}
+    #cpx p{margin:.6em 0} #cpx .msg{color:#555;font-size:.9em;min-height:1.2em}
+    #cpx-badge{position:fixed;right:8px;bottom:8px;z-index:99998;background:#111c;color:#fff;font:12px system-ui;
+    padding:4px 8px;border-radius:6px} #cpx-badge a{color:#9cf;cursor:pointer;margin-left:6px}`;
+  const overlay = document.createElement('div');
+  overlay.id = 'cpx';
+  overlay.innerHTML = `<div class="box"><h2>CrossPoint serial file manager</h2>
+    <p id="cpx-text">Connect the reader's USB-C cable, then choose its serial port.</p>
+    <p><button id="cpx-btn">Choose serial port</button></p><p class="msg" id="cpx-msg"></p></div>`;
+  const badge = document.createElement('div');
+  badge.id = 'cpx-badge'; badge.hidden = true;
+  const transfer = document.createElement('div');
+  transfer.id = 'cpx-badge'; transfer.style.bottom = '36px'; transfer.hidden = true;
+  const mount = () => { document.head.appendChild(style); document.body.append(overlay, badge, transfer); };
+  if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount);
+  const $ = (id) => overlay.querySelector(id);
+  const setMsg = (t) => { const m = $('#cpx-msg'); if (m) m.textContent = t || ''; };
+  const showProgress = (t) => { transfer.hidden = !t; transfer.textContent = t || ''; };
+
+  async function handshake(port) {
+    for (const baud of [BAUD_FAST, BAUD_SLOW]) {
+      try { await link.open(port, baud); } catch (e) { setMsg('Cannot open the port: ' + e.message); throw e; }
+      try {
+        await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 700, retries: 2 });
+        if (baud !== BAUD_FAST) {
+          await link.call(CMD.BAUD, u32(BAUD_FAST));
+          await link.close();
+          await link.open(port, BAUD_FAST);
+          await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 1000, retries: 3 });
+        }
+        return true;
+      } catch (e) {
+        await link.close();
+      }
+    }
+    return false;
+  }
+
+  async function connect(port) {
+    $('#cpx-text').textContent = 'Opening the port... On the reader, open File Transfer > Serial Transfer.';
+    $('#cpx-btn').hidden = true;
+    for (let attempt = 0; ; attempt++) {  // keeps trying so the reader can be put in the mode afterwards
+      if (await handshake(port)) break;
+      setMsg('Waiting for the reader (Serial Transfer must be open on it)... ' + (attempt + 1));
+      await sleep(800);
+    }
+    connected = true;
+    overlay.hidden = true;
+    badge.hidden = false;
+    badge.innerHTML = 'Serial ' + link.baud + ' baud <a id="cpx-change">change port</a>';
+    badge.querySelector('#cpx-change').onclick = () => location.reload();
+    resolveConnected();
+  }
+
+  $('#cpx-btn').onclick = async () => {
+    if (!('serial' in navigator)) { setMsg('Web Serial is not available. Use Chrome or Edge.'); return; }
+    try { connect(await navigator.serial.requestPort()); } catch (e) { setMsg(e.message); }
+  };
+  if (!('serial' in navigator)) {
+    setMsg('This browser has no Web Serial support. Open the page in Chrome or Edge.');
+  } else {
+    navigator.serial.getPorts().then((ports) => { if (ports.length === 1) connect(ports[0]); }).catch(() => {});
+  }
+
+  // ---- file operations ----
+  const norm = (p) => '/' + decodeURIComponent(p || '/').replace(/\\/g, '/').split('/').filter(Boolean).join('/');
+  const joinPath = (a, b) => norm(a + '/' + b);
+  const parentOf = (p) => norm(p.slice(0, p.lastIndexOf('/')) || '/');
+
+  async function listDir(path) {
+    const out = []; let start = 0;
+    for (;;) {
+      const d = await link.call(CMD.LIST, cat(u32(start), enc.encode(path)), { what: 'list ' + path });
+      const more = d[0]; let i = 1;
+      while (i < d.length) {
+        const flags = d[i], size = (d[i + 1] | (d[i + 2] << 8) | (d[i + 3] << 16) | (d[i + 4] << 24)) >>> 0, n = d[i + 5];
+        const name = dec.decode(d.slice(i + 6, i + 6 + n)); i += 6 + n; start++;
+        out.push({ name, size, isDirectory: !!(flags & 1), isEpub: !(flags & 1) && /\.epub$/i.test(name) });
+      }
+      if (!more) return out;
+    }
+  }
+  async function readFile(path, onProgress) {
+    const o = await link.call(CMD.READ_OPEN, enc.encode(path), { what: 'open ' + path });
+    const size = (o[0] | (o[1] << 8) | (o[2] << 16) | (o[3] << 24)) >>> 0;
+    const parts = []; let off = 0;
+    try {
+      while (off < size) {
+        const n = Math.min(CHUNK, size - off);
+        const d = await link.call(CMD.READ, cat(u32(off), new Uint8Array([n & 255, n >> 8])), { what: 'read' });
+        if (!d.length) throw new Error('short read');
+        parts.push(d); off += d.length;
+        if (onProgress) onProgress(off, size);
+      }
+    } finally { await link.call(CMD.CLOSE, new Uint8Array(0), { retries: 1 }).catch(() => {}); }
+    return new Blob(parts);
+  }
+  async function writeFile(path, data, overwrite, onProgress) {
+    await link.call(CMD.WRITE_OPEN, cat(new Uint8Array([overwrite ? 1 : 0]), enc.encode(path)), { what: 'create ' + path });
+    try {
+      for (let off = 0; off < data.length; off += CHUNK) {
+        await link.call(CMD.WRITE, cat(u32(off), data.subarray(off, off + CHUNK)), { what: 'write' });
+        if (onProgress) onProgress(Math.min(off + CHUNK, data.length), data.length);
+      }
+      await link.call(CMD.WRITE_END, new Uint8Array(0), { timeout: 15000, what: 'finish ' + path });
+    } catch (e) {
+      await link.call(CMD.CLOSE, new Uint8Array(0), { retries: 1 }).catch(() => {});
+      throw e;
+    }
+  }
+
+  const fieldOf = (body, name) => {
+    if (body instanceof FormData) return body.get(name);
+    if (typeof body === 'string') return new URLSearchParams(body).get(name);
+    if (body instanceof URLSearchParams) return body.get(name);
+    return null;
+  };
+  const codeFor = (e) => ({ 3: 404, 4: 400, 5: 403 }[e.status] || 500);
+
+  // Returns {status, body, type} for the stock web UI's endpoints.
+  async function route(method, url, body, onProgress) {
+    const u = new URL(url, 'http://reader/');
+    const q = u.searchParams;
+    try {
+      if (method === 'GET' && u.pathname === '/api/files') {
+        return { status: 200, type: 'application/json', body: JSON.stringify(await listDir(norm(q.get('path') || '/'))) };
+      }
+      if (method === 'GET' && u.pathname === '/api/status') {
+        const s = JSON.parse(dec.decode(await link.call(CMD.STATUS)));
+        return { status: 200, type: 'application/json', body: JSON.stringify(Object.assign(s, {
+          firmwareFamily: 'crosspoint', pluginApi: 1, pluginCapabilities: '', ip: 'USB serial', mode: 'STA', rssi: 0 })) };
+      }
+      if (method === 'GET' && (u.pathname === '/api/plugins' || u.pathname === '/api/opds')) {
+        return { status: 200, type: 'application/json', body: '[]' };
+      }
+      if (method === 'POST' && u.pathname === '/upload') {
+        const file = body.get('file');
+        const data = new Uint8Array(await file.arrayBuffer());
+        const overwrite = ['1', 'true'].includes(q.get('overwrite'));
+        await writeFile(joinPath(norm(q.get('path') || '/'), file.name), data, overwrite, onProgress);
+        return { status: 200, type: 'text/plain', body: 'File uploaded successfully: ' + file.name };
+      }
+      if (method === 'POST' && u.pathname === '/mkdir') {
+        await link.call(CMD.MKDIR, enc.encode(joinPath(norm(fieldOf(body, 'path') || '/'), fieldOf(body, 'name'))),
+                        { what: 'mkdir', timeout: 10000 });
+        return { status: 200, type: 'text/plain', body: 'Folder created' };
+      }
+      if (method === 'POST' && u.pathname === '/rename') {
+        const src = norm(fieldOf(body, 'path'));
+        await link.call(CMD.RENAME, cat(enc.encode(src), new Uint8Array([0]), enc.encode(joinPath(parentOf(src), fieldOf(body, 'name')))),
+                        { what: 'rename', timeout: 10000 });
+        return { status: 200, type: 'text/plain', body: 'Renamed' };
+      }
+      if (method === 'POST' && u.pathname === '/move') {
+        const src = norm(fieldOf(body, 'path'));
+        const dst = joinPath(norm(fieldOf(body, 'dest')), src.slice(src.lastIndexOf('/') + 1));
+        await link.call(CMD.RENAME, cat(enc.encode(src), new Uint8Array([0]), enc.encode(dst)), { what: 'move', timeout: 10000 });
+        return { status: 200, type: 'text/plain', body: 'Moved' };
+      }
+      if (method === 'POST' && u.pathname === '/delete') {
+        const raw = fieldOf(body, 'paths');
+        const paths = raw ? JSON.parse(raw) : [fieldOf(body, 'path')];
+        const failed = [];
+        for (const p of paths) {
+          try { await link.call(CMD.DELETE, enc.encode(norm(p)), { what: 'delete', timeout: 10000 }); }
+          catch (e) { failed.push(p + ' (' + e.message + ')'); }
+        }
+        return failed.length ? { status: 500, type: 'text/plain', body: 'Failed to delete some items: ' + failed.join('; ') }
+                             : { status: 200, type: 'text/plain', body: 'All items deleted successfully' };
+      }
+      return { status: 404, type: 'text/plain', body: 'Not available over the serial cable' };
+    } catch (e) {
+      return { status: e instanceof DeviceError ? codeFor(e) : 503, type: 'text/plain', body: e.message };
+    }
+  }
+
+  // ---- replace the network layer ----
+  const realFetch = window.fetch ? window.fetch.bind(window) : null;
+  window.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (/^https?:\/\/(?!reader)/.test(url) && !url.startsWith(location.origin) && realFetch) return realFetch(input, init);
+    await connectedPromise;
+    const r = await route((init.method || 'GET').toUpperCase(), url, init.body);
+    return new Response(r.body, { status: r.status, headers: { 'Content-Type': r.type } });
+  };
+
+  class FakeXHR {
+    constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this.readyState = 0; this._l = {}; }
+    open(method, url) { this.method = method.toUpperCase(); this.url = url; this.readyState = 1; }
+    setRequestHeader() {}
+    addEventListener(t, fn) { this['on' + t] = fn; }
+    abort() { this.aborted = true; if (this.onabort) this.onabort(); }
+    async send(body) {
+      await connectedPromise;
+      const onProgress = (loaded, total) => { if (this.upload.onprogress) this.upload.onprogress({ lengthComputable: true, loaded, total }); };
+      showProgress(this.method === 'POST' && this.url.startsWith('/upload') ? 'Uploading...' : '');
+      const r = await route(this.method, this.url, body, (l, t) => { onProgress(l, t); showProgress('Uploading ' + Math.round(100 * l / t) + '%'); });
+      showProgress('');
+      if (this.aborted) return;
+      this.status = r.status; this.responseText = r.body; this.readyState = 4;
+      if (this.onload) this.onload();
+    }
+  }
+  window.XMLHttpRequest = FakeXHR;
+
+  // The reader has no WebSocket upload server: fail fast so the page uses HTTP uploads.
+  window.WebSocket = class {
+    constructor() {
+      this.readyState = 3; this.bufferedAmount = 0;
+      setTimeout(() => { if (this.onerror) this.onerror(new Event('error')); if (this.onclose) this.onclose({ code: 1006 }); }, 0);
+    }
+    send() {} close() {}
+  };
+
+  // Downloads: intercept links to /download and fetch the file over serial.
+  document.addEventListener('click', async (ev) => {
+    const a = ev.target.closest && ev.target.closest('a[href]');
+    if (!a) return;
+    const href = a.getAttribute('href') || '';
+    if (!href.startsWith('/download')) return;
+    ev.preventDefault();
+    const path = norm(new URL(href, 'http://reader/').searchParams.get('path'));
+    try {
+      await connectedPromise;
+      const blob = await readFile(path, (l, t) => showProgress('Downloading ' + Math.round(100 * l / t) + '%'));
+      const url = URL.createObjectURL(blob);
+      const d = document.createElement('a');
+      d.href = url; d.download = path.slice(path.lastIndexOf('/') + 1);
+      document.body.appendChild(d); d.click(); d.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (e) { alert('Download failed: ' + e.message); }
+    showProgress('');
+  }, true);
+
+  // Scripts the page loads on demand from the reader (/js/...): serve embedded copies.
+  const embedded = window.__cpxScripts || {};
+  const srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+  Object.defineProperty(HTMLScriptElement.prototype, 'src', {
+    get() { return srcDesc.get.call(this); },
+    set(v) {
+      if (typeof v === 'string' && embedded[v.split('?')[0]]) {
+        v = URL.createObjectURL(new Blob([embedded[v.split('?')[0]]], { type: 'text/javascript' }));
+      }
+      srcDesc.set.call(this, v);
+    },
+  });
+})();

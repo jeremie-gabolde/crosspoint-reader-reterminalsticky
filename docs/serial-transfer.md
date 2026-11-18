@@ -1,0 +1,48 @@
+# Serial Transfer (USB-C file manager)
+
+For boards whose USB-C port is a USB-to-serial bridge (reTerminal Sticky), the SD card cannot be
+exported as a drive and WiFi may be unavailable. **File Transfer > Serial Transfer** lets a
+computer manage the SD card over the USB cable.
+
+## Use
+
+1. On the reader: *File Transfer > Serial Transfer*. Keep the USB-C cable plugged in.
+2. On the computer, open `tools/serial_bridge/crosspoint-serial.html` in **Chrome or Edge**
+   (double-click works; Web Serial is allowed on `file://`).
+3. Click **Choose serial port** and pick the reader's port (CH343 / USB-Serial). The page
+   handshakes at 921600 baud (fallback 115200) and shows the regular CrossPoint file manager:
+   browse, upload, download, create folder, rename, move, delete.
+4. Press Back on the reader to leave the mode (logging resumes).
+
+Regenerate the page after changing the web UI: `python tools/serial_bridge/build_page.py`.
+`tools/serial_bridge/serial_bridge.py` is an alternative local HTTP bridge (needs no Web Serial,
+Windows only).
+
+Limits: folders cannot be moved/renamed (as in the web UI), settings/fonts/plugin pages need WiFi.
+The reader's log output is muted while the mode is active.
+
+## Protocol
+
+Request: `A5 5A | cmd | len(u16 LE) | payload | crc32(u32 LE)`;
+response: `A5 5A | status | len(u16 LE) | payload | crc32`. CRC32 (zlib) covers
+cmd/status, length and payload. Max payload 4096. Stop-and-wait; the host retries on timeout;
+a corrupt frame gets no reply.
+
+| cmd | name | payload -> response |
+|---|---|---|
+| 1 | HELLO | - -> `CPXFER1\0` |
+| 2 | LIST | u32 start index + path -> u8 more, entries (u8 flags bit0=dir, u32 size, u8 len, name) |
+| 3 | READ_OPEN | path -> u32 size |
+| 4 | READ | u32 offset, u16 len -> data |
+| 5 | CLOSE | - |
+| 6 | WRITE_OPEN | u8 overwrite + path (writes to `<path>.part`) |
+| 7 | WRITE | u32 offset + data (a repeated chunk is accepted) |
+| 8 | WRITE_END | - (renames `.part` to the target) |
+| 9 | MKDIR | path |
+| 10 | RENAME | old NUL new |
+| 11 | DELETE | path (empty folders only) |
+| 12 | BAUD | u32 baud (applied after the reply) |
+| 13 | STATUS | - -> JSON |
+
+Status: 0 OK, 1 bad cmd, 2 bad arg, 3 not found, 4 exists/not empty, 5 protected, 6 I/O, 7 state.
+Protected/credential paths and `.`/`..` segments are refused as in the web server.
