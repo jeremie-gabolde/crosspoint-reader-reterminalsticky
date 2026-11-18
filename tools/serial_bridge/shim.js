@@ -12,7 +12,7 @@
   const BAUD_SLOW = 115200;
   const CHUNK = 4000;
   const CMD = { HELLO: 1, LIST: 2, READ_OPEN: 3, READ: 4, CLOSE: 5, WRITE_OPEN: 6, WRITE: 7, WRITE_END: 8,
-                MKDIR: 9, RENAME: 10, DELETE: 11, BAUD: 12, STATUS: 13 };
+                MKDIR: 9, RENAME: 10, DELETE: 11, BAUD: 12, STATUS: 13, API: 14, API_READ: 15 };
   const STATUS_TEXT = { 1: 'unknown command', 2: 'bad argument', 3: 'not found',
                         4: 'already exists (or folder not empty)', 5: 'protected path', 6: 'I/O error', 7: 'bad state' };
   const enc = new TextEncoder();
@@ -187,6 +187,7 @@
     badge.innerHTML = 'Serial ' + link.baud + ' baud <a id="cpx-change">change port</a>';
     badge.querySelector('#cpx-change').onclick = () => location.reload();
     resolveConnected();
+    navigate('/files');
   }
 
   $('#cpx-btn').onclick = async () => {
@@ -246,10 +247,26 @@
     }
   }
 
+  // Settings / fonts are served by the reader's own web-server code (CMD_API).
+  async function callApi(method, uri, body) {
+    const m = new Uint8Array([method]);
+    const payload = body ? cat(m, enc.encode(uri), new Uint8Array([0]), enc.encode(body)) : cat(m, enc.encode(uri));
+    const d = await link.call(CMD.API, payload, { timeout: 20000, what: 'request' });
+    const http = d[0] | (d[1] << 8);
+    const total = (d[2] | (d[3] << 8) | (d[4] << 16) | (d[5] << 24)) >>> 0;
+    const parts = []; let off = 0;
+    while (off < total) {
+      const n = Math.min(CHUNK, total - off);
+      const c = await link.call(CMD.API_READ, cat(u32(off), new Uint8Array([n & 255, n >> 8])), { what: 'read' });
+      if (!c.length) break;
+      parts.push(c); off += c.length;
+    }
+    return { status: http, text: dec.decode(cat(...parts)) };
+  }
+
   const fieldOf = (body, name) => {
-    if (body instanceof FormData) return body.get(name);
     if (typeof body === 'string') return new URLSearchParams(body).get(name);
-    if (body instanceof URLSearchParams) return body.get(name);
+    if (body && typeof body.get === 'function') return body.get(name);  // FormData / URLSearchParams (any window)
     return null;
   };
   const codeFor = (e) => ({ 3: 404, 4: 400, 5: 403 }[e.status] || 500);
@@ -267,7 +284,23 @@
         return { status: 200, type: 'application/json', body: JSON.stringify(Object.assign(s, {
           firmwareFamily: 'crosspoint', pluginApi: 1, pluginCapabilities: '', ip: 'USB serial', mode: 'STA', rssi: 0 })) };
       }
-      if (method === 'GET' && (u.pathname === '/api/plugins' || u.pathname === '/api/opds')) {
+      if (u.pathname === '/api/settings' || u.pathname === '/api/fonts' || u.pathname === '/api/fonts/delete') {
+        const post = method === 'POST';
+        const r = await callApi(post ? 1 : 0, u.pathname + u.search, post && typeof body === 'string' ? body : '');
+        return { status: r.status, type: u.pathname === '/api/settings' && post ? 'text/plain' : 'application/json', body: r.text };
+      }
+      if (method === 'POST' && u.pathname === '/api/fonts/upload') {
+        const file = body.get('file'), family = body.get('family');
+        try {
+          const data = new Uint8Array(await file.arrayBuffer());
+          await writeFile('/@font/' + family + '/' + file.name.replace(/ /g, '_'), data, true, onProgress);
+          return { status: 200, type: 'application/json', body: '{"ok":true}' };
+        } catch (e) {
+          if (e instanceof DeviceError) return { status: 400, type: 'application/json', body: '{"error":"Invalid font file"}' };
+          throw e;
+        }
+      }
+      if (method === 'GET' && (u.pathname === '/api/plugins' || u.pathname === '/api/opds' || u.pathname === '/api/wifi')) {
         return { status: 200, type: 'application/json', body: '[]' };
       }
       if (method === 'POST' && u.pathname === '/upload') {
@@ -311,54 +344,66 @@
     }
   }
 
-  // ---- replace the network layer ----
-  const realFetch = window.fetch ? window.fetch.bind(window) : null;
-  window.fetch = async (input, init = {}) => {
-    const url = typeof input === 'string' ? input : input.url;
-    if (/^https?:\/\/(?!reader)/.test(url) && !url.startsWith(location.origin) && realFetch) return realFetch(input, init);
-    await connectedPromise;
-    const r = await route((init.method || 'GET').toUpperCase(), url, init.body);
-    return new Response(r.body, { status: r.status, headers: { 'Content-Type': r.type } });
-  };
-
+  // ---- page host: each CrossPoint page runs in its own iframe whose network layer is replaced ----
   class FakeXHR {
-    constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this.readyState = 0; this._l = {}; }
+    constructor() { this.upload = {}; this.status = 0; this.responseText = ''; this.readyState = 0; }
     open(method, url) { this.method = method.toUpperCase(); this.url = url; this.readyState = 1; }
     setRequestHeader() {}
     addEventListener(t, fn) { this['on' + t] = fn; }
     abort() { this.aborted = true; if (this.onabort) this.onabort(); }
     async send(body) {
       await connectedPromise;
-      const onProgress = (loaded, total) => { if (this.upload.onprogress) this.upload.onprogress({ lengthComputable: true, loaded, total }); };
-      showProgress(this.method === 'POST' && this.url.startsWith('/upload') ? 'Uploading...' : '');
-      const r = await route(this.method, this.url, body, (l, t) => { onProgress(l, t); showProgress('Uploading ' + Math.round(100 * l / t) + '%'); });
+      const onProgress = (loaded, total) => {
+        if (this.upload.onprogress) this.upload.onprogress({ lengthComputable: true, loaded, total });
+        showProgress('Transferring ' + Math.round(100 * loaded / total) + '%');
+      };
+      const r = await route(this.method, this.url, body, onProgress);
       showProgress('');
       if (this.aborted) return;
       this.status = r.status; this.responseText = r.body; this.readyState = 4;
       if (this.onload) this.onload();
     }
   }
-  window.XMLHttpRequest = FakeXHR;
 
   // The reader has no WebSocket upload server: fail fast so the page uses HTTP uploads.
-  window.WebSocket = class {
+  class FakeWS {
     constructor() {
       this.readyState = 3; this.bufferedAmount = 0;
       setTimeout(() => { if (this.onerror) this.onerror(new Event('error')); if (this.onclose) this.onclose({ code: 1006 }); }, 0);
     }
     send() {} close() {}
-  };
+  }
 
-  // Downloads: intercept links to /download and fetch the file over serial.
-  document.addEventListener('click', async (ev) => {
-    const a = ev.target.closest && ev.target.closest('a[href]');
-    if (!a) return;
-    const href = a.getAttribute('href') || '';
-    if (!href.startsWith('/download')) return;
-    ev.preventDefault();
-    const path = norm(new URL(href, 'http://reader/').searchParams.get('path'));
-    try {
+  const pages = window.__cpxPages || {};
+  const embedded = window.__cpxScripts || {};
+  let frame = null, currentUrl = '/files';
+
+  function install(win, search) {
+    win.__cpxSearch = search;
+    win.__cpxReload = () => navigate(currentUrl);
+    win.fetch = async (input, init = {}) => {
+      const url = typeof input === 'string' ? input : input.url;
       await connectedPromise;
+      const r = await route((init.method || 'GET').toUpperCase(), url, init.body);
+      return new Response(r.body, { status: r.status, headers: { 'Content-Type': r.type } });
+    };
+    win.XMLHttpRequest = FakeXHR;
+    win.WebSocket = FakeWS;
+    // Scripts the page loads on demand from the reader (/js/...): serve embedded copies.
+    const proto = win.HTMLScriptElement.prototype;
+    const srcDesc = Object.getOwnPropertyDescriptor(proto, 'src');
+    Object.defineProperty(proto, 'src', {
+      get() { return srcDesc.get.call(this); },
+      set(v) {
+        const key = typeof v === 'string' ? v.split('?')[0] : '';
+        if (embedded[key]) v = URL.createObjectURL(new Blob([embedded[key]], { type: 'text/javascript' }));
+        srcDesc.set.call(this, v);
+      },
+    });
+  }
+
+  async function download(path) {
+    try {
       const blob = await readFile(path, (l, t) => showProgress('Downloading ' + Math.round(100 * l / t) + '%'));
       const url = URL.createObjectURL(blob);
       const d = document.createElement('a');
@@ -367,18 +412,36 @@
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (e) { alert('Download failed: ' + e.message); }
     showProgress('');
-  }, true);
+  }
 
-  // Scripts the page loads on demand from the reader (/js/...): serve embedded copies.
-  const embedded = window.__cpxScripts || {};
-  const srcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
-  Object.defineProperty(HTMLScriptElement.prototype, 'src', {
-    get() { return srcDesc.get.call(this); },
-    set(v) {
-      if (typeof v === 'string' && embedded[v.split('?')[0]]) {
-        v = URL.createObjectURL(new Blob([embedded[v.split('?')[0]]], { type: 'text/javascript' }));
+  function hook(doc) {
+    doc.addEventListener('click', (ev) => {
+      const a = ev.target.closest && ev.target.closest('a[href]');
+      if (!a) return;
+      const href = a.getAttribute('href') || '';
+      if (href.startsWith('/download')) {
+        ev.preventDefault();
+        download(norm(new URL(href, 'http://reader/').searchParams.get('path')));
+      } else if (href.startsWith('/') && !href.startsWith('//')) {
+        ev.preventDefault();
+        navigate(href);
       }
-      srcDesc.set.call(this, v);
-    },
-  });
+    }, true);
+  }
+
+  function navigate(url) {
+    const u = new URL(url, 'http://reader/');
+    const html = pages[u.pathname];
+    if (!html) { alert('This page is not available over the serial cable (it needs WiFi).'); return; }
+    currentUrl = u.pathname + u.search;
+    const f = document.createElement('iframe');
+    f.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;border:0;background:#fff';
+    document.body.insertBefore(f, document.body.firstChild);
+    install(f.contentWindow, u.search);
+    const d = f.contentDocument;
+    d.open(); d.write(html); d.close();
+    hook(d);
+    if (frame) frame.remove();
+    frame = f;
+  }
 })();

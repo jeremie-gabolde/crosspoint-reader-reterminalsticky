@@ -41,6 +41,8 @@ class SerialTransferActivity final : public Activity {
   uint8_t cmdWriteOpen(const uint8_t* p, size_t n);
   uint8_t cmdWrite(const uint8_t* p, size_t n);
   uint8_t cmdWriteEnd();
+  uint8_t cmdApi(const uint8_t* p, size_t n);
+  uint8_t cmdApiRead(const uint8_t* p, size_t n);
   uint8_t cmdMkdir(const uint8_t* p, size_t n);
   uint8_t cmdRename(const uint8_t* p, size_t n);
   uint8_t cmdDelete(const uint8_t* p, size_t n);
@@ -64,6 +66,9 @@ class SerialTransferActivity final : public Activity {
   std::string writeTarget;
   std::string writePart;
   bool writeOverwrite = false;
+  bool writeIsFont = false;
+  bool writeIsVector = false;
+  std::string apiOut;
 
   uint32_t pendingBaud = 0;
   bool hostSeen = false;

@@ -18,7 +18,8 @@ Regenerate the page after changing the web UI: `python tools/serial_bridge/build
 `tools/serial_bridge/serial_bridge.py` is an alternative local HTTP bridge (needs no Web Serial,
 Windows only).
 
-Limits: folders cannot be moved/renamed (as in the web UI), settings/fonts/plugin pages need WiFi.
+The Home, Files, Settings and Fonts pages work; Plugins, WiFi and OPDS pages need WiFi.
+Limits: folders cannot be moved/renamed (as in the web UI).
 The reader's log output is muted while the mode is active.
 
 ## Protocol
@@ -43,6 +44,10 @@ a corrupt frame gets no reply.
 | 11 | DELETE | path (empty folders only) |
 | 12 | BAUD | u32 baud (applied after the reply) |
 | 13 | STATUS | - -> JSON |
+| 14 | API | u8 method (0 GET, 1 POST) + uri [+ NUL + body] -> u16 HTTP status, u32 body length (`/api/settings`, `/api/fonts`, `/api/fonts/delete`) |
+| 15 | API_READ | u32 offset, u16 len -> bytes of the last API body |
+
+Font upload: WRITE_OPEN on `/@font/<family>/<file>` installs the file in the font folder (same validation as the web uploader).
 
 Status: 0 OK, 1 bad cmd, 2 bad arg, 3 not found, 4 exists/not empty, 5 protected, 6 I/O, 7 state.
 Protected/credential paths and `.`/`..` segments are refused as in the web server.

@@ -1,7 +1,9 @@
 #include "SerialTransferActivity.h"
 
+#include <ArduinoJson.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalMemory.h>
 #include <HiddenItems.h>
 #include <Logging.h>
 #include <esp_heap_caps.h>
@@ -11,7 +13,10 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#include "FontInstaller.h"
 #include "MappedInputManager.h"
+#include "SdCardFontSystem.h"
+#include "network/CrossPointWebServer.h"
 #include "activities/ActivityManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -37,6 +42,8 @@ enum Cmd : uint8_t {
   CMD_DELETE = 0x0B,
   CMD_BAUD = 0x0C,
   CMD_STATUS = 0x0D,
+  CMD_API = 0x0E,
+  CMD_API_READ = 0x0F,
 };
 
 enum Status : uint8_t {
@@ -91,6 +98,23 @@ bool pathAllowed(const std::string& path) {
   return !protectedpaths::isSensitivePath(path.c_str());
 }
 
+// Print sink that appends to a std::string (API responses).
+class StringSink final : public Print {
+ public:
+  explicit StringSink(std::string& out) : out_(out) {}
+  size_t write(uint8_t c) override {
+    out_.push_back(static_cast<char>(c));
+    return 1;
+  }
+  size_t write(const uint8_t* data, size_t len) override {
+    out_.append(reinterpret_cast<const char*>(data), len);
+    return len;
+  }
+
+ private:
+  std::string& out_;
+};
+
 std::string toPath(const uint8_t* p, size_t n) { return std::string(reinterpret_cast<const char*>(p), n); }
 
 std::string trimSlash(std::string p) {
@@ -128,6 +152,7 @@ void SerialTransferActivity::onEnter() {
 
 void SerialTransferActivity::onExit() {
   closeFiles();
+  apiOut = std::string();
   if (writePart.empty() == false) Storage.remove(writePart.c_str());
   if (rxBuf) heap_caps_free(rxBuf);
   if (txBuf) heap_caps_free(txBuf);
@@ -298,6 +323,12 @@ void SerialTransferActivity::handleFrame() {
     case CMD_DELETE:
       status = cmdDelete(p, n);
       break;
+    case CMD_API:
+      status = cmdApi(p, n);
+      break;
+    case CMD_API_READ:
+      status = cmdApiRead(p, n);
+      break;
     case CMD_BAUD:
       if (n == 4) {
         pendingBaud = rd32(p);
@@ -399,10 +430,35 @@ uint8_t SerialTransferActivity::cmdRead(const uint8_t* p, size_t n) {
 // WRITE_OPEN: u8 overwrite + path. Data goes to "<path>.part" until WRITE_END.
 uint8_t SerialTransferActivity::cmdWriteOpen(const uint8_t* p, size_t n) {
   if (n < 2) return ST_BAD_ARG;
-  const bool overwrite = p[0] != 0;
-  const std::string path = trimSlash(toPath(p + 1, n - 1));
-  if (!pathAllowed(path) || path == "/") return ST_PROTECTED;
+  bool overwrite = p[0] != 0;
+  std::string path = trimSlash(toPath(p + 1, n - 1));
   closeFiles();
+  writeIsFont = false;
+  writeIsVector = false;
+  if (path.rfind("/@font/", 0) == 0) {
+    // Font upload: "/@font/<family>/<file>" is mapped to the font folder, with the
+    // same validation as the web uploader.
+    const std::string rest = path.substr(7);
+    const size_t slash = rest.find('/');
+    if (slash == std::string::npos) return ST_BAD_ARG;
+    const std::string family = rest.substr(0, slash);
+    const std::string file = rest.substr(slash + 1);
+    const bool psram = HalMemory::getPsramHeap().totalBytes > 0;
+    writeIsVector = psram && FontInstaller::isValidVectorFontFilename(file.c_str());
+    if (!FontInstaller::isValidFamilyName(family.c_str()) ||
+        (!writeIsVector && !FontInstaller::isValidCpfontFilename(file.c_str()))) {
+      return ST_BAD_ARG;
+    }
+    FontInstaller installer(sdFontSystem.registry());
+    if (!installer.ensureFamilyDir(family.c_str())) return ST_IO;
+    char real[128];
+    FontInstaller::buildFontPath(family.c_str(), file.c_str(), real, sizeof(real));
+    path = real;
+    overwrite = true;
+    writeIsFont = true;
+  } else if (!pathAllowed(path) || path == "/") {
+    return ST_PROTECTED;
+  }
   if (Storage.exists(path.c_str())) {
     HalFile existing = Storage.open(path.c_str());
     const bool isDir = existing && existing.isDirectory();
@@ -440,17 +496,117 @@ uint8_t SerialTransferActivity::cmdWriteEnd() {
   writeFile.flush();
   writeFile.close();
   uint8_t status = ST_OK;
-  if (writeOverwrite && Storage.exists(writeTarget.c_str())) removeBookFile(writeTarget.c_str());
+  if (writeIsFont) {
+    // Same magic-byte check as the web uploader.
+    uint8_t magic[8] = {0};
+    HalFile part;
+    bool ok = false;
+    if (Storage.openFileForRead("SER", writePart.c_str(), part)) {
+      ok = part.read(magic, 8) == 8;
+      part.close();
+    }
+    if (ok) {
+      if (writeIsVector) {
+        static const uint8_t ttf[4] = {0x00, 0x01, 0x00, 0x00};
+        ok = memcmp(magic, ttf, 4) == 0 || memcmp(magic, "OTTO", 4) == 0 || memcmp(magic, "true", 4) == 0;
+      } else {
+        ok = memcmp(magic, "CPFONT\0\0", 8) == 0;
+      }
+    }
+    if (!ok) {
+      Storage.remove(writePart.c_str());
+      writePart.clear();
+      writeTarget.clear();
+      return ST_BAD_ARG;
+    }
+    if (Storage.exists(writeTarget.c_str())) Storage.remove(writeTarget.c_str());
+  } else if (writeOverwrite && Storage.exists(writeTarget.c_str())) {
+    removeBookFile(writeTarget.c_str());
+  }
   if (!Storage.rename(writePart.c_str(), writeTarget.c_str())) {
     Storage.remove(writePart.c_str());
     status = ST_IO;
   }
   writePart.clear();
   writeTarget.clear();
+  if (writeIsFont && status == ST_OK) sdFontSystem.markRegistryDirty();
+  writeIsFont = false;
   filesDone++;
   lastAction = "Received " + std::to_string(filesDone) + " file(s)";
   dirty = true;
   return status;
+}
+
+// API: u8 method (0 GET, 1 POST) + uri [+ NUL + body]. Runs the same code as the web
+// server's /api/settings and /api/fonts handlers. Reply: u16 HTTP status + u32 body
+// length; the body is then fetched with API_READ (u32 offset + u16 length).
+uint8_t SerialTransferActivity::cmdApi(const uint8_t* p, size_t n) {
+  if (n < 2) return ST_BAD_ARG;
+  const bool post = p[0] == 1;
+  const uint8_t* nul = static_cast<const uint8_t*>(memchr(p + 1, 0, n - 1));
+  const std::string uri = toPath(p + 1, nul ? static_cast<size_t>(nul - (p + 1)) : n - 1);
+  const std::string body = nul ? toPath(nul + 1, n - static_cast<size_t>(nul - p) - 1) : std::string();
+  std::string route = uri;
+  std::string query;
+  const size_t q = uri.find('?');
+  if (q != std::string::npos) {
+    route = uri.substr(0, q);
+    query = uri.substr(q + 1);
+  }
+
+  apiOut.clear();
+  uint16_t http = 404;
+  StringSink sink(apiOut);
+  if (!post && route == "/api/settings") {
+    String keys;
+    if (query.rfind("keys=", 0) == 0) keys = query.substr(5).c_str();
+    CrossPointWebServer::writeSettingsJson(sink, keys);
+    http = 200;
+  } else if (post && route == "/api/settings") {
+    String error;
+    const int applied = CrossPointWebServer::applySettingsJson(String(body.c_str()), error);
+    if (applied < 0) {
+      apiOut = error.c_str();
+      http = 400;
+    } else {
+      apiOut = "Applied " + std::to_string(applied) + " setting(s)";
+      http = 200;
+    }
+  } else if (!post && route == "/api/fonts") {
+    sdFontSystem.refreshIfDirty();
+    http = CrossPointWebServer::writeFontListJson(sink) ? 200 : 500;
+  } else if (post && route == "/api/fonts/delete") {
+    JsonDocument doc;
+    if (deserializeJson(doc, body) || !doc["family"].is<const char*>()) {
+      apiOut = "{\"error\":\"Invalid request\"}";
+      http = 400;
+    } else if (CrossPointWebServer::deleteFontFamily(doc["family"])) {
+      apiOut = "{\"ok\":true}";
+      http = 200;
+    } else {
+      apiOut = "{\"error\":\"Delete failed\"}";
+      http = 500;
+    }
+  }
+  txBuf[5] = static_cast<uint8_t>(http);
+  txBuf[6] = static_cast<uint8_t>(http >> 8);
+  wr32(txBuf + 7, static_cast<uint32_t>(apiOut.size()));
+  txLen = 6;
+  lastAction = "Settings / fonts";
+  dirty = true;
+  return ST_OK;
+}
+
+uint8_t SerialTransferActivity::cmdApiRead(const uint8_t* p, size_t n) {
+  if (n != 6) return ST_BAD_ARG;
+  const uint32_t off = rd32(p);
+  size_t len = static_cast<size_t>(p[4]) | (static_cast<size_t>(p[5]) << 8);
+  if (len > MAX_PAYLOAD) len = MAX_PAYLOAD;
+  if (off > apiOut.size()) return ST_BAD_ARG;
+  len = std::min(len, static_cast<size_t>(apiOut.size() - off));
+  memcpy(txBuf + 5, apiOut.data() + off, len);
+  txLen = len;
+  return ST_OK;
 }
 
 uint8_t SerialTransferActivity::cmdMkdir(const uint8_t* p, size_t n) {

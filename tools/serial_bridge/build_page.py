@@ -23,28 +23,43 @@ def asset(symbol):
 
 
 def main():
-    page = asset("FilesPageHtml")
+    import base64
     css = asset("webCss")
     icons = asset("iconsSvg")
+    logo = "data:image/svg+xml;base64," + base64.b64encode(asset("crosspoint_iconSvg").encode()).decode()
     embedded = {
         "/js/jszip.min.js": asset("jszip_minJs"),
         "/js/epub-optimizer.js": asset("epub_optimizerJs"),
     }
     shim = open(os.path.join(HERE, "shim.js"), encoding="utf-8").read()
-    page = page.replace('<link rel="stylesheet" href="/assets/web.css">', "<style>" + css + "</style>")
-    page = re.sub(r'<link[^>]*href="/assets/web\.css"[^>]*>', lambda m: "<style>" + css + "</style>", page)
-    page = page.replace("/assets/icons.svg#", "#")
-    page = re.sub(r'<script src="/js/plugin-host\.js"></script>', "", page)
-    boot = ("<script>window.__cpxScripts=" + json.dumps(embedded).replace("</", "<" + chr(92) + "/") + ";</script>"
-            "<script>" + shim.replace("</script", "<" + chr(92) + "/script") + "</script>")
-    page = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + boot + '<div style="display:none">' + icons + "</div>",
-                  page, count=1)
-    import base64
-    logo = "data:image/svg+xml;base64," + base64.b64encode(asset("crosspoint_iconSvg").encode()).decode()
-    page = page.replace("/assets/crosspoint-icon.svg", logo)
+
+    def prepare(symbol):
+        page = asset(symbol)
+        page = re.sub(r'<link[^>]*href="/assets/web\.css"[^>]*>', lambda m: "<style>" + css + "</style>", page)
+        page = re.sub(r'<link[^>]*rel="icon"[^>]*>', "", page)
+        page = page.replace("/assets/icons.svg#", "#")
+        page = page.replace("/assets/crosspoint-icon.svg", logo)
+        page = page.replace('<script src="/js/plugin-host.js"></script>', "")
+        # No real URL inside the page host: navigation and reload go through the shim.
+        page = page.replace("window.location.search", "window.__cpxSearch")
+        page = page.replace("window.location.reload()", "window.__cpxReload()")
+        page = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + '<div style="display:none">' + icons + "</div>",
+                      page, count=1)
+        return page
+
+    pages = {"/": prepare("HomePageHtml"), "/files": prepare("FilesPageHtml"),
+             "/settings": prepare("SettingsPageHtml"), "/fonts": prepare("FontsPageHtml")}
+    bs = "<" + chr(92) + "/"
+    def js(obj):
+        return json.dumps(obj).replace("</", bs)
+    shell = ('<!DOCTYPE html><html><head><meta charset="utf-8">'
+             '<meta name="viewport" content="width=device-width,initial-scale=1">'
+             '<title>CrossPoint serial file manager</title></head><body style="margin:0">'
+             "<script>window.__cpxScripts=" + js(embedded) + ";window.__cpxPages=" + js(pages) + ";</script>"
+             "<script>" + shim.replace("</script", bs + "script") + "</script></body></html>")
     out = os.path.join(HERE, "crosspoint-serial.html")
-    open(out, "w", encoding="utf-8").write(page)
-    print("wrote", out, len(page), "bytes")
+    open(out, "w", encoding="utf-8").write(shell)
+    print("wrote", out, len(shell), "bytes")
 
 
 if __name__ == "__main__":
