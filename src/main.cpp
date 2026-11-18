@@ -5,6 +5,7 @@
 #include <FontCacheManager.h>
 #include <FontDecompressor.h>
 #include <GfxRenderer.h>
+#include <HalBuzzer.h>
 #include <HalClock.h>
 #include <HalDisplay.h>
 #include <HalFrontlight.h>
@@ -746,6 +747,9 @@ void setup() {
   }
 
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);
+
+  // Startup chirp on cold boot and sleep wake; silent reboots are internal.
+  if (!isSilentReboot) HalBuzzer::beep(SETTINGS.buttonBeep != 0);
 
   // Apply a switch moved during sleep before the first paint, so the wake
   // screen does not draw in the old night mode and then repaint.
