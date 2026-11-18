@@ -49,7 +49,8 @@
 
     async open(port, baud) {
       await port.open({ baudRate: baud, bufferSize: 1 << 16 });
-      try { await port.setSignals({ dataTerminalReady: false, requestToSend: false }); } catch (e) { /* optional */ }
+      // DTR on, RTS off: the line state verified to work with the reader (both off froze it).
+      try { await port.setSignals({ dataTerminalReady: true, requestToSend: false }); } catch (e) { /* optional */ }
       this.port = port; this.baud = baud; this.rx = new Uint8Array(0);
       this.reader = port.readable.getReader(); this.writer = port.writable.getWriter();
       this.reading = true;
