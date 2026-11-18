@@ -79,6 +79,15 @@ uint8_t subscriptionMask(const char* plugin);
 // (e.g. a fresh sleep image) instead of in the next online session.
 bool wantsConnectAny();
 
+// Seconds the device should sleep before waking itself to deliver sleep.enter
+// again (e.g. refresh a sleep image), or 0 for none. A plugin that subscribes to
+// sleep.enter opts in with a top-level device.json entry
+//   "wake_interval": { "cfg": "refresh_hours", "unit": "hours" }
+// naming a key of its config file (the same file as {cfg.KEY}); "unit" is
+// "hours" (default) or "minutes". The value is the user's setting, 0/missing
+// disables it. The shortest interval across plugins wins; clamped to 15 min..7 d.
+uint32_t sleepWakeIntervalSeconds();
+
 // Appends the event to each subscribing plugin's outbox. No-op without
 // subscribers. An outbox over the size cap is dropped wholesale first (the
 // newest events carry the current state; stale ones are worthless by then).

@@ -24,6 +24,7 @@
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
 #include <esp_heap_caps.h>
+#include <esp_sleep.h>
 #include <esp_wifi.h>
 #include <time.h>
 
@@ -453,9 +454,12 @@ static bool holdSleepWhileUsbPowered() {
 #endif
 
 // Enter deep sleep mode
-void enterDeepSleep(bool fromTimeout = false) {
+// refreshWake: a timer wake that only refreshes the sleep screen (see the
+// Timer case in setup()); no activity is running, so the reader state saved by
+// the real sleep must be left alone.
+void enterDeepSleep(bool fromTimeout = false, bool refreshWake = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
-  APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
+  if (!refreshWake) APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
 
   // Sleep may end in a power-off (battery death, latch); persist the clock
   // floor now so a later cold boot resumes from it.
@@ -501,6 +505,16 @@ void enterDeepSleep(bool fromTimeout = false) {
 #else
   const bool wakeOnHeldButton = false;
 #endif
+
+  // A plugin may ask to be woken periodically (e.g. to refresh its sleep image).
+  // Quick Resume keeps the app frame on the panel, which a refresh would replace.
+  if (!isQuickResumeSleep && powerManager.getBatteryPercentage() >= 20) {
+    const uint32_t wakeSeconds = pluginevents::sleepWakeIntervalSeconds();
+    if (wakeSeconds > 0) {
+      LOG_DBG("MAIN", "Timer wake armed in %lu s", static_cast<unsigned long>(wakeSeconds));
+      esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(wakeSeconds) * 1000000ULL);
+    }
+  }
 
   halTiltSensor.deepSleep();
   display.deepSleep();
@@ -723,6 +737,21 @@ void setup() {
       powerManager.startDeepSleep(gpio);
       break;
 #endif
+    case HalGPIO::WakeupReason::Timer:
+      // Self-wake requested by a plugin (sleep.enter wake_interval): redo the
+      // sleep-time delivery and sleep screen, then go straight back to sleep.
+      // Nothing is restored for the user; the retained frame stays until then.
+      LOG_DBG("MAIN", "Timer wake: refreshing sleep screen");
+      if (SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
+          Storage.exists(SLEEP_FRAME_FILE) || !pluginevents::anySubscriber(pluginevents::Event::SleepEnter) ||
+          powerManager.getBatteryPercentage() < 20) {
+        // A Quick Resume frame or a low battery must not be touched.
+        Storage.prepareForDeepSleep();
+        powerManager.startDeepSleep(gpio);
+      }
+      setupDisplayAndFonts(true);
+      enterDeepSleep(false, true);
+      break;
     case HalGPIO::WakeupReason::AfterFlash:
       // After flashing, just proceed to boot
     case HalGPIO::WakeupReason::Other:
