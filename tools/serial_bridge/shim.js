@@ -128,7 +128,8 @@
   const connectedPromise = new Promise((r) => { resolveConnected = r; });
 
   const style = document.createElement('style');
-  style.textContent = `#cpx{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;
+  style.textContent = `#cpx[hidden],#cpx-badge[hidden],#cpx button[hidden]{display:none!important}
+    #cpx{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;
     align-items:center;justify-content:center;font-family:system-ui,sans-serif}
     #cpx .box{background:#fff;color:#111;max-width:30em;margin:1em;padding:1.5em;border-radius:12px;box-shadow:0 8px 40px #0006}
     #cpx button{font-size:1em;padding:.6em 1.2em;border-radius:8px;border:0;background:#2563eb;color:#fff;cursor:pointer}
