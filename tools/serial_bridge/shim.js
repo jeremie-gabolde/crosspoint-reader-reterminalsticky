@@ -44,7 +44,7 @@
 
   // ---- serial link ----
   const link = {
-    port: null, reader: null, writer: null, rx: new Uint8Array(0), waiter: null, reading: false, baud: 0,
+    received: 0, port: null, reader: null, writer: null, rx: new Uint8Array(0), waiter: null, reading: false, baud: 0,
     chain: Promise.resolve(),
 
     async open(port, baud) {
@@ -58,7 +58,7 @@
           while (this.reading) {
             const { value, done } = await this.reader.read();
             if (done) break;
-            if (value && value.length) { this.rx = cat(this.rx, value); if (this.waiter) this.waiter(); }
+            if (value && value.length) { this.received += value.length; this.rx = cat(this.rx, value); if (this.waiter) this.waiter(); }
           }
         } catch (e) { /* closed */ }
       })();
@@ -149,32 +149,35 @@
   const setMsg = (t) => { const m = $('#cpx-msg'); if (m) m.textContent = t || ''; };
   const showProgress = (t) => { transfer.hidden = !t; transfer.textContent = t || ''; };
 
-  async function handshake(port) {
-    for (const baud of [BAUD_FAST, BAUD_SLOW]) {
-      try { await link.open(port, baud); } catch (e) { setMsg('Cannot open the port: ' + e.message); throw e; }
-      try {
-        await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 700, retries: 2 });
-        if (baud !== BAUD_FAST) {
-          await link.call(CMD.BAUD, u32(BAUD_FAST));
-          await link.close();
-          await link.open(port, BAUD_FAST);
-          await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 1000, retries: 3 });
-        }
-        return true;
-      } catch (e) {
-        await link.close();
-      }
-    }
-    return false;
-  }
-
+  // Opens the port ONCE at 115200 (the reader's start speed) and keeps retrying HELLO
+  // without closing it: re-opening toggles DTR/RTS, which can reset the reader.
   async function connect(port) {
     $('#cpx-text').textContent = 'Opening the port... On the reader, open File Transfer > Serial Transfer.';
     $('#cpx-btn').hidden = true;
-    for (let attempt = 0; ; attempt++) {  // keeps trying so the reader can be put in the mode afterwards
-      if (await handshake(port)) break;
-      setMsg('Waiting for the reader (Serial Transfer must be open on it)... ' + (attempt + 1));
-      await sleep(800);
+    try { await link.open(port, BAUD_SLOW); } catch (e) { setMsg('Cannot open the port: ' + e.message); $('#cpx-btn').hidden = false; return; }
+    let total = 0;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const before = link.received;
+        await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 800, retries: 1 });
+        break;
+      } catch (e) {
+        setMsg('Waiting for the reader (Serial Transfer must be open on it)... try ' + attempt +
+               ' - bytes received from the reader so far: ' + link.received +
+               (link.received ? ' (it sends data but not valid frames: baud/pins?)' : ' (nothing at all)'));
+        await sleep(300);
+      }
+    }
+    try {
+      await link.call(CMD.BAUD, u32(BAUD_FAST));
+      await sleep(50);
+      await link.close();
+      await link.open(port, BAUD_FAST);
+      await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 1000, retries: 3 });
+    } catch (e) {
+      // Fast speed failed: fall back to the slow one (the reader may or may not have switched).
+      try { await link.close(); await link.open(port, BAUD_SLOW); await link.call(CMD.HELLO, new Uint8Array(0), { timeout: 1000, retries: 2 }); }
+      catch (e2) { setMsg('Lost the reader after the speed change: ' + e2.message); return; }
     }
     connected = true;
     overlay.hidden = true;
