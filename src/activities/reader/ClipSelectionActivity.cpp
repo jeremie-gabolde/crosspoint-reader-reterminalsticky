@@ -11,7 +11,6 @@
 #include <algorithm>
 #include <climits>
 #include <cstdlib>
-#include <cstring>
 
 #include "ClippingStore.h"
 #include "CrossPointSettings.h"
@@ -410,32 +409,8 @@ void ClipSelectionActivity::confirmSelection(const ClippingResult::Action action
     return;
   }
 
-  int first = std::min(rangeStart, selected);
-  int last = std::max(rangeStart, selected);
-  if (action == ClippingResult::Action::Lookup && first == last) {
-    // A single press on one piece of an elided word (we|'|re) looks up the whole word.
-    const auto isApostrophe = [this](const int i) {
-      const char* t = cleanWordStart(words[i].text);
-      return strcmp(t, "'") == 0 || strcmp(t, "\xE2\x80\x99") == 0 || strcmp(t, "\xCA\xBC") == 0;
-    };
-    const auto joined = [this](const int a, const int b) {  // b directly follows a in the source
-      return words[a].row == words[b].row && !words[b].paragraphStart && words[a].endOffset != UINT32_MAX &&
-             words[a].endOffset == words[b].startOffset;
-    };
-    const int count = static_cast<int>(wordCount);
-    if (isApostrophe(first)) {
-      if (first > 0 && joined(first - 1, first) && !isApostrophe(first - 1)) first--;
-      if (last + 1 < count && joined(last, last + 1) && !isApostrophe(last + 1)) last++;
-    }
-    while (last + 2 < count && isApostrophe(last + 1) && !isApostrophe(last + 2) && joined(last, last + 1) &&
-           joined(last + 1, last + 2)) {
-      last += 2;
-    }
-    while (first - 2 >= 0 && isApostrophe(first - 1) && !isApostrophe(first - 2) && joined(first - 1, first) &&
-           joined(first - 2, first - 1)) {
-      first -= 2;
-    }
-  }
+  const int first = std::min(rangeStart, selected);
+  const int last = std::max(rangeStart, selected);
   ClippingResult result;
   result.action = action;
   const auto heap = HalMemory::getDefaultHeap();
