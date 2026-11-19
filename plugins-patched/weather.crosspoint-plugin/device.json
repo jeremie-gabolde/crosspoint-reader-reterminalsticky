@@ -1,0 +1,19 @@
+{
+  "title": "Weather",
+  "description": "Local weather on your sleep screen. Set your location in the plugin settings in your reader's web UI..",
+  "config": {
+    "file": "config.json"
+  },
+  "wake_interval": {
+    "cfg": "refresh_hours",
+    "unit": "hours"
+  },
+  "events": {
+    "sleep.enter": {
+      "download": {
+        "url": "{cfg.worker_url}?latitude={cfg.latitude}&longitude={cfg.longitude}&location={cfg.city}&unit={cfg.unit}&time_format={cfg.time_format}&country_code={cfg.country_code}",
+        "dest": "/sleep.bmp"
+      }
+    }
+  }
+}

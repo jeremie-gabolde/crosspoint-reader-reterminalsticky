@@ -1,0 +1,10 @@
+{
+  "worker_url": "https://crosspointer-weather-plugin.johnny353535.workers.dev/weather.bmp",
+  "latitude": "52.52",
+  "longitude": "13.405",
+  "city": "Berlin",
+  "unit": "celsius",
+  "time_format": "auto",
+  "country_code": "DE",
+  "refresh_hours": "3"
+}

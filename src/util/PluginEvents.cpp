@@ -151,6 +151,41 @@ uint8_t subscriptionMask(const char* plugin) {
   return 0;
 }
 
+uint32_t sleepWakeIntervalSeconds() {
+  constexpr uint32_t MIN_SECONDS = 15 * 60;
+  constexpr uint32_t MAX_SECONDS = 7 * 24 * 3600;
+  uint32_t best = 0;
+  for (const auto& sub : subscribers) {
+    if (sub.name[0] == '\0' || !(sub.mask & eventBit(Event::SleepEnter))) continue;
+    std::string raw;
+    if (!Storage.readFileToString("PEVT", std::string(sub.dir) + "/device.json", MAX_MANIFEST_SIZE, raw)) continue;
+    JsonDocument filter;
+    filter["wake_interval"] = true;
+    filter["config"] = true;
+    JsonDocument doc;
+    if (deserializeJson(doc, raw, DeserializationOption::Filter(filter)) != DeserializationError::Ok) continue;
+    const char* key = doc["wake_interval"]["cfg"] | "";
+    if (key[0] == '\0') continue;
+    const bool minutes = strcmp(doc["wake_interval"]["unit"] | "hours", "minutes") == 0;
+    const std::string configFile = pluginhttp::inPluginDir(sub.dir, doc["config"]["file"] | "");
+    if (configFile.empty()) continue;
+    pluginhttp::Headers config;
+    pluginhttp::loadConfigFile(configFile, config);
+    const std::string pattern = key;
+    for (const auto& kv : config) {
+      if (kv.first != pattern) continue;
+      const float value = strtof(kv.second.c_str(), nullptr);
+      if (!(value > 0.0f)) break;
+      const float seconds = value * (minutes ? 60.0f : 3600.0f);
+      uint32_t s = seconds >= static_cast<float>(MAX_SECONDS) ? MAX_SECONDS : static_cast<uint32_t>(seconds);
+      if (s < MIN_SECONDS) s = MIN_SECONDS;
+      if (best == 0 || s < best) best = s;
+      break;
+    }
+  }
+  return best;
+}
+
 bool wantsConnectAny() {
   for (const auto& sub : subscribers) {
     if (sub.name[0] == '\0' || sub.connectMask == 0) continue;

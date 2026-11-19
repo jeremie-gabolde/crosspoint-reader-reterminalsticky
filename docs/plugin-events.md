@@ -184,6 +184,26 @@ that particular sleep should tolerate or ignore the late retry, e.g. by checking
 `{event.ts}`). Other events already queued for the same plugin (`reader.exit` and
 friends) ride along in the sleep-time drain.
 
+### Periodic wake (`wake_interval`)
+
+A plugin that subscribes to `sleep.enter` may also ask the device to wake itself
+while asleep, e.g. to refresh a sleep image that goes stale. Declare, at the top
+level of `device.json`, the key of the plugin's `config` file that holds the
+user's interval:
+
+```json
+"config": { "file": "config.json" },
+"wake_interval": { "cfg": "refresh_hours", "unit": "hours" }
+```
+
+`unit` is `"hours"` (default) or `"minutes"`; a missing, `0` or non-numeric value
+disables it. At sleep entry the device arms a deep-sleep timer for the shortest
+interval across plugins (clamped to 15 minutes ... 7 days). On the timer wake it
+does not boot the UI: it repeats the sleep-time `sleep.enter` delivery above
+(same WiFi rules), redraws the sleep screen and sleeps again. Not armed with the
+Quick Resume sleep screen, below 20% battery, or when the SD card has a pending
+Quick Resume frame. The timer wake's `sleep.enter` carries no book variables.
+
 Auth reuses the catalog vocabulary from the same `device.json`: `{token}` is
 read from the declared token file, and on a 401/403 a `"password"`-type auth
 section mints a fresh token and retries once — same behavior as catalog
