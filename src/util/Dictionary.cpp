@@ -965,10 +965,15 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
         // Elided prefixes are short (l, qu, jusqu, puisqu); "dog's" keeps its stem path.
         const bool shortPrefix = i > segmentStart && i - segmentStart <= 7;
         const size_t suffixStart = i + apostropheBytes;
+        const size_t prefixStart = segmentStart;
+        const size_t prefixEnd = i;
         segmentStart = suffixStart;
         i = suffixStart;
         if (!shortPrefix || n - suffixStart < 2) continue;
-        const std::string suffix = cleaned.substr(suffixStart);
+        std::string suffix = cleaned.substr(suffixStart);
+        // English contractions (we're, they've, you'll): the word is in front of the apostrophe.
+        if (suffix == "re" || suffix == "ve" || suffix == "ll")
+          suffix = cleaned.substr(prefixStart, prefixEnd - prefixStart);
         bool suffixReadError = false;
         locateAll(session, suffix.c_str(), group, &suffixReadError);
         searchFailed = searchFailed || suffixReadError;
