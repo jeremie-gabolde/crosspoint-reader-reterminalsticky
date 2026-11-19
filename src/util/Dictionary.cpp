@@ -870,7 +870,7 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
   // cleanWord plus three stem variants can retain five input-sized buffers,
   // including growth of a concatenated variant. Keep the viewer intact on OOM.
   const size_t wordBytes = word ? strlen(word) + 1 : 1;
-  const size_t workingBytes = 6 * wordBytes + 8 * sizeof(std::string) + DEFINITION_HEAP_HEADROOM_BYTES;
+  const size_t workingBytes = 5 * wordBytes + 6 * sizeof(std::string) + DEFINITION_HEAP_HEADROOM_BYTES;
   const auto heap = HalMemory::getDefaultHeap();
   if (heap.freeBytes < workingBytes || heap.largestBlockBytes < 2 * wordBytes) {
     LOG_ERR("DICT", "Low heap for lookup (%u byte working set)", static_cast<unsigned>(workingBytes));
@@ -936,58 +936,6 @@ bool Dictionary::lookup(const char* word, std::string& definitionOut, std::strin
           matchedHeadwordOut = group.front().headword.get();
           break;
         }
-      }
-    }
-
-    // Elision (French l'homme, qu'il; Italian dell'arte): the layout keeps the
-    // apostrophe inside one word, so after the whole word and its stems miss,
-    // retry with the text after each short elided prefix, longest first.
-    if (group.empty() && !group.lowMemory()) {
-      const size_t n = cleaned.size();
-      size_t segmentStart = 0;
-      std::vector<std::string> variants;
-      for (size_t i = 0; i < n && group.empty() && !group.lowMemory();) {
-        const auto c = static_cast<unsigned char>(cleaned[i]);
-        size_t apostropheBytes = 0;
-        if (c == '\'') {
-          apostropheBytes = 1;  // U+0027
-        } else if (c == 0xCA && i + 1 < n && static_cast<unsigned char>(cleaned[i + 1]) == 0xBC) {
-          apostropheBytes = 2;  // U+02BC modifier letter apostrophe
-        } else if (c == 0xE2 && i + 2 < n && static_cast<unsigned char>(cleaned[i + 1]) == 0x80 &&
-                   (static_cast<unsigned char>(cleaned[i + 2]) == 0x99 ||
-                    static_cast<unsigned char>(cleaned[i + 2]) == 0x98)) {
-          apostropheBytes = 3;  // U+2019 / U+2018
-        }
-        if (apostropheBytes == 0) {
-          i++;
-          continue;
-        }
-        // Elided prefixes are short (l, qu, jusqu, puisqu); "dog's" keeps its stem path.
-        const bool shortPrefix = i > segmentStart && i - segmentStart <= 7;
-        const size_t suffixStart = i + apostropheBytes;
-        const size_t prefixStart = segmentStart;
-        const size_t prefixEnd = i;
-        segmentStart = suffixStart;
-        i = suffixStart;
-        if (!shortPrefix || n - suffixStart < 2) continue;
-        std::string suffix = cleaned.substr(suffixStart);
-        // English contractions (we're, they've, you'll): the word is in front of the apostrophe.
-        if (suffix == "re" || suffix == "ve" || suffix == "ll")
-          suffix = cleaned.substr(prefixStart, prefixEnd - prefixStart);
-        bool suffixReadError = false;
-        locateAll(session, suffix.c_str(), group, &suffixReadError);
-        searchFailed = searchFailed || suffixReadError;
-        if (group.lowMemory()) break;
-        if (group.empty()) {
-          stemVariants(suffix, variants);
-          for (const auto& variant : variants) {
-            bool variantReadError = false;
-            locateAll(session, variant.c_str(), group, &variantReadError);
-            searchFailed = searchFailed || variantReadError;
-            if (group.lowMemory() || !group.empty()) break;
-          }
-        }
-        if (!group.empty() && !group.lowMemory()) matchedHeadwordOut = group.front().headword.get();
       }
     }
   }
