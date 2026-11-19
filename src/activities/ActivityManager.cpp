@@ -117,7 +117,8 @@ void ActivityManager::loop() {
     return;
   }
 
-  if (currentActivity) {
+  // Radio shutdown can defer a screen change after the outgoing activity has released its resources.
+  if (currentActivity && pendingAction == PendingAction::None) {
     if (!currentActivity->isHomeActivity() && mappedInput.wasHomeGesture()) {
       if (currentActivity->handleHomeGesture()) {
         return;
@@ -281,13 +282,14 @@ void ActivityManager::goToJoinNetwork() {
   replaceActivity(std::make_unique<CrossPointWebServerActivity>(renderer, mappedInput, /*startInJoinNetwork=*/true));
 }
 
-void ActivityManager::goToSerialTransfer() {
+bool ActivityManager::goToSerialTransfer() {
   auto activity = makeUniqueNoThrow<SerialTransferActivity>(renderer, mappedInput);
   if (!activity) {
     LOG_ERR("ACT", "OOM: Serial Transfer activity");
-    return;
+    return false;
   }
   replaceActivity(std::move(activity));
+  return true;
 }
 
 void ActivityManager::goToUsbDrive() {
