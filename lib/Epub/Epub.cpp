@@ -398,7 +398,10 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
       parseResult = CssParser::ParseResult::Error;
       continue;
     }
-    const CssParser::ParseResult streamResult = cssParser->loadFromStream(tempCssFile);
+    const size_t cssDirEnd = cssPath.find_last_of('/');
+    const std::string_view cssDir =
+        cssDirEnd == std::string::npos ? std::string_view{} : std::string_view(cssPath).substr(0, cssDirEnd + 1);
+    const CssParser::ParseResult streamResult = cssParser->loadFromStream(tempCssFile, cssDir);
     // Explicitly close() file before calling Storage.remove()
     tempCssFile.close();
     Storage.remove(tmpCssPath.c_str());
@@ -433,6 +436,9 @@ CssParser::ParseResult Epub::parseCssFiles(const CssParser::CacheStatus existing
     LOG_ERR("EBP", "Failed to save CSS rules to cache");
     cssParser->clear();
     return CssParser::ParseResult::Error;
+  }
+  if (!cssParser->saveFontFaces()) {
+    LOG_ERR("EBP", "Failed to save @font-face rules");
   }
 
   LOG_DBG("EBP", "Loaded %zu CSS style rules from %zu files (%zu identical duplicates skipped, %s)",
@@ -1221,27 +1227,6 @@ int Epub::getTocItemsCount() const {
   }
 
   return bookMetadataCache->getTocCount();
-}
-
-// work out the section index for a toc index
-int Epub::getSpineIndexForTocIndex(const int tocIndex) const {
-  if (!bookMetadataCache || !bookMetadataCache->isLoaded()) {
-    LOG_ERR("EBP", "getSpineIndexForTocIndex called but cache not loaded");
-    return 0;
-  }
-
-  if (tocIndex < 0 || tocIndex >= bookMetadataCache->getTocCount()) {
-    LOG_ERR("EBP", "getSpineIndexForTocIndex: tocIndex %d out of range", tocIndex);
-    return 0;
-  }
-
-  const int spineIndex = bookMetadataCache->getTocEntry(tocIndex).spineIndex;
-  if (spineIndex < 0) {
-    LOG_DBG("EBP", "Section not found for TOC index %d", tocIndex);
-    return 0;
-  }
-
-  return spineIndex;
 }
 
 int Epub::getTocIndexForSpineIndex(const int spineIndex) const { return getSpineItem(spineIndex).tocIndex; }
