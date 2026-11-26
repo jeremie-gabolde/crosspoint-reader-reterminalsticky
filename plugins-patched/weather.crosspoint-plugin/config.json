@@ -6,5 +6,6 @@
   "unit": "celsius",
   "time_format": "auto",
   "country_code": "DE",
+  "hourly_step": "2",
   "refresh_hours": "3"
 }

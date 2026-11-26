@@ -52,6 +52,10 @@ CrossPoint.registerPlugin(async (container, api) => {
 			</span>
 		</div>
 		<p>Needs a saved WiFi network and at least 20% battery. Each refresh wakes the reader briefly, so a shorter interval uses more battery.</p>
+		<div class="setting-row">
+			<span class="setting-name">Hours between forecasts</span>
+			<span class="setting-control"><input id="weather-hourly-step" type="number" min="1" max="6" step="1" value="2" disabled></span>
+		</div>
 		<p>Weather data from <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo</a> and its weather-model providers. Adapted for this sleep screen. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>.</p>
 	`;
 
@@ -62,6 +66,7 @@ CrossPoint.registerPlugin(async (container, api) => {
 	const saveButton = container.querySelector('#weather-location-save');
 	const temperatureUnit = container.querySelector('#weather-temperature-unit');
 	const timeFormat = container.querySelector('#weather-time-format');
+	const hourlyStep = container.querySelector('#weather-hourly-step');
 	const refreshHours = container.querySelector('#weather-refresh-hours');
 	let selectedPlace = null;
 	let savedConfig = {};
@@ -224,6 +229,26 @@ CrossPoint.registerPlugin(async (container, api) => {
 		}
 	});
 
+	function normalizeHourlyStep(value) {
+		const parsed = Number.parseInt(value, 10);
+		return Number.isFinite(parsed) ? Math.min(Math.max(parsed, 1), 6) : 2;
+	}
+
+	hourlyStep.addEventListener('change', async () => {
+		const previous = normalizeHourlyStep(savedConfig.hourly_step);
+		const value = normalizeHourlyStep(hourlyStep.value);
+		hourlyStep.value = String(value);
+		const config = { ...savedConfig, hourly_step: String(value) };
+		try {
+			await api.writeFile(configPath, btoa(JSON.stringify(config)));
+			savedConfig = config;
+			setStatus('The hourly forecast now steps by ' + value + ' h. It will appear after the next sleep-screen download.');
+		} catch (error) {
+			hourlyStep.value = String(previous);
+			setStatus('Could not save the hourly step: ' + error.message);
+		}
+	});
+
 	const saved = await loadConfig();
 	savedConfig = saved || {};
 	let configMigrationFailed = false;
@@ -251,6 +276,8 @@ CrossPoint.registerPlugin(async (container, api) => {
 	temperatureUnit.disabled = false;
 	timeFormat.value = ['12h', '24h'].includes(savedConfig.time_format) ? savedConfig.time_format : 'auto';
 	timeFormat.disabled = false;
+	hourlyStep.value = String(normalizeHourlyStep(savedConfig.hourly_step));
+	hourlyStep.disabled = false;
 	refreshHours.value = Array.from(refreshHours.options).some((o) => o.value === String(savedConfig.refresh_hours))
 		? String(savedConfig.refresh_hours)
 		: '0';
